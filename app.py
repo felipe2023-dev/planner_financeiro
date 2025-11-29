@@ -7,9 +7,25 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import hashlib
+import calendar
 from typing import Optional, Tuple, Dict, Any, List
 
 DB_FILE = "finance_manager.db"
+
+DEFAULT_EXPENSE_CLASSES = [
+    'Combustível',
+    'Manutenção preventiva',
+    'Manutenção corretiva',
+    'Alimentação',
+    'Compras no débito',
+    'Educação',
+    'Financiamento',
+    'Luz', 'Água', 'Internet',
+    'Cartão de Crédito (compra)',
+    'Telefonia', 'Aluguel', 'Impostos',
+    'Outros'
+]
+
 
 # ---------- DB LAYER ----------
 
@@ -89,6 +105,18 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+
+    # expense categories (classes de despesa)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS expense_categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        planner_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        created_at TEXT,
+        UNIQUE(planner_id, name),
+        FOREIGN KEY(planner_id) REFERENCES planners(id)
+    );
+    """)
 
     # credit cards
     cur.execute("""
@@ -310,6 +338,57 @@ def delete_expense(expense_id: int):
     conn.commit()
     conn.close()
 
+def get_expense_categories(planner_id: int) -> List[str]:
+    """Retorna lista de classes de despesa para o planner.
+    Inclui categorias padrão, categorias já usadas em despesas e
+    categorias personalizadas salvas na tabela expense_categories.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    # garante que categorias padrão existam
+    now = datetime.utcnow().isoformat()
+    for cat in DEFAULT_EXPENSE_CLASSES:
+        cur.execute(
+            """INSERT OR IGNORE INTO expense_categories(planner_id, name, created_at)
+            VALUES(?,?,?)""",
+            (planner_id, cat, now),
+        )
+    conn.commit()
+
+    # importa categorias já usadas em despesas
+    cur.execute("SELECT DISTINCT category FROM expenses WHERE planner_id = ?", (planner_id,))
+    used = [r[0] for r in cur.fetchall() if r[0]]
+    for cat in used:
+        cur.execute(
+            """INSERT OR IGNORE INTO expense_categories(planner_id, name, created_at)
+            VALUES(?,?,?)""",
+            (planner_id, cat, now),
+        )
+    conn.commit()
+
+    cur.execute(
+        "SELECT name FROM expense_categories WHERE planner_id = ? ORDER BY name",
+        (planner_id,),
+    )
+    rows = [r[0] for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def add_expense_category(planner_id: int, name: str) -> None:
+    name = (name or "").strip()
+    if not name:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute(
+        """INSERT OR IGNORE INTO expense_categories(planner_id, name, created_at)
+        VALUES(?,?,?)""",
+        (planner_id, name, now),
+    )
+    conn.commit()
+    conn.close()
+
 def set_expense_paid(expense_id: int, paid: bool):
     conn = get_connection()
     cur = conn.cursor()
@@ -417,6 +496,28 @@ def month_range(center: date, past: int = 1, future: int = 1) -> List[Tuple[int,
         months.append((y,m))
     return months
 
+def months_between(start_date: date, end_date: date) -> List[Tuple[int, int]]:
+    """Retorna lista de (ano, mês) entre duas datas (inclusive)."""
+    months: List[Tuple[int, int]] = []
+    y, m = start_date.year, start_date.month
+    while (y < end_date.year) or (y == end_date.year and m <= end_date.month):
+        months.append((y, m))
+        if m == 12:
+            y += 1
+            m = 1
+        else:
+            m += 1
+    return months
+
+def add_months(base_date: date, months: int) -> date:
+    """Soma `months` meses à data base, ajustando o dia se necessário."""
+    new_month_index = (base_date.month - 1) + months
+    new_year = base_date.year + new_month_index // 12
+    new_month = new_month_index % 12 + 1
+    last_day = calendar.monthrange(new_year, new_month)[1]
+    new_day = min(base_date.day, last_day)
+    return date(new_year, new_month, new_day)
+
 def occurs_in_month(start_date: date, recurrence: str,
                     months_count: Optional[int],
                     target_year: int, target_month: int) -> bool:
@@ -463,8 +564,8 @@ def compute_monthly_expenses(df_expenses: pd.DataFrame,
         total += df_i.loc[mask2, "amount_due"].sum()
     return float(total)
 
-def build_kpi_data(planner_id: int) -> Dict[str, Any]:
-    today = date.today()
+def build_kpi_data(planner_id: int, reference_date: Optional[date] = None) -> Dict[str, Any]:
+    today = reference_date or date.today()
     df_inc = get_incomes(planner_id)
     df_exp = get_expenses(planner_id)
     df_inv = get_invoices_for_planner(planner_id)
@@ -670,6 +771,28 @@ def set_page_config():
     }
     .alert-badge span.bell {
         font-size: 1rem;
+    }
+
+    /* Chart containers */
+    .chart-card {
+        border-radius: 16px;
+        padding: 16px 18px 14px 18px;
+        background: #ffffff;
+        box-shadow: 0 10px 24px rgba(15,23,42,0.10);
+        margin-bottom: 18px;
+        border: 1px solid #e5e7eb;
+    }
+    .chart-card-title {
+        font-weight: 600;
+        font-size: 0.95rem;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .chart-card-title .label {
+        font-size: 0.8rem;
+        opacity: 0.7;
     }
 
     /* Alert cards below KPIs */
@@ -915,6 +1038,7 @@ def sidebar_planner_selector():
 
 # ---------- PAGES ----------
 
+
 def dashboard_page(planner_id: int):
     planner = get_planner(planner_id)
     if not planner:
@@ -922,268 +1046,420 @@ def dashboard_page(planner_id: int):
         return
 
     currency = planner["currency"]
-    kpi_data = build_kpi_data(planner_id)
-    data = kpi_data["raw"]
-    today = kpi_data["today"]
-
-    keys_sorted = sorted(data.keys())
-    if len(keys_sorted) < 3:
-        st.info("Cadastre pelo menos uma renda para visualizar o dashboard completo.")
-        return
-
-    prev_key, current_key, next_key = keys_sorted
-
-    inc_prev = data[prev_key]["income"]
-    inc_curr = data[current_key]["income"]
-    inc_next = data[next_key]["income"]
-
-    exp_prev = data[prev_key]["expenses"]
-    exp_curr = data[current_key]["expenses"]
-    exp_next = data[next_key]["expenses"]
-
-    renda_delta = ((inc_curr - inc_prev) / inc_prev * 100) if inc_prev else None
-    desp_delta = ((exp_curr - exp_prev) / exp_prev * 100) if exp_prev else None
-
-    ratio = (exp_curr / inc_curr) if inc_curr else 0.0
-    threshold = planner["alert_threshold"]
-    ratio_pct = ratio * 100
-
-    # Saldo acumulado
-    acc = compute_accumulated_balances(planner_id)
-    saldo_atual = acc["saldo_atual"]
-    saldo_futuro = acc["saldo_futuro"]
 
     st.markdown("## 🌟 Visão geral financeira")
-    if ratio > threshold:
-        st.markdown(
-            f'<div class="alert-badge"><span class="bell">🔔</span> Alerta: suas despesas representam {ratio_pct:.1f}% da renda deste mês (limite configurado: {threshold*100:.0f}%).</div>',
-            unsafe_allow_html=True
-        )
 
-    col_left, col_right = st.columns([1, 2])
+    # Seleção de ano para análise com abas mensais
+    today = date.today()
+    year_options = [today.year - 1, today.year, today.year + 1]
+    if today.year not in year_options:
+        year_options.append(today.year)
+    year_options = sorted(set(year_options))
 
-    with col_left:
-        show_kpi_card(
-            "Renda - mês atual",
-            inc_curr,
-            currency,
-            renda_delta,
-            help_text=f"Mês anterior: {format_currency(inc_prev, currency)} • Próximo mês projetado: {format_currency(inc_next, currency)}",
-            variant="income",
-        )
-        show_kpi_card(
-            "Despesas - mês atual",
-            exp_curr,
-            currency,
-            desp_delta,
-            help_text=f"Mês anterior: {format_currency(exp_prev, currency)} • Próximo mês previsto: {format_currency(exp_next, currency)}",
-            variant="expense",
-        )
-        show_kpi_card(
-            "Resultado do mês (renda - despesas)",
-            inc_curr - exp_curr,
-            currency,
-            None,
-            help_text=f"Comprometimento: {ratio_pct:.1f}% da renda",
-            variant="net",
-        )
-        show_kpi_card(
-            "Saldo acumulado até o mês atual",
-            saldo_atual,
-            currency,
-            None,
-            help_text="Resultado histórico ajustado por aportes e gastos pontuais.",
-            variant="net",
-        )
-        show_kpi_card(
-            "Saldo acumulado projetado (12 meses)",
-            saldo_futuro,
-            currency,
-            None,
-            help_text="Projeção considerando rendas, despesas e ajustes futuros.",
-            variant="net",
-        )
+    year_selected = st.selectbox(
+        "Ano de análise",
+        options=year_options,
+        index=year_options.index(today.year),
+        help="Escolha o ano para navegar mês a mês pelos indicadores.",
+        key="dashboard_year_select",
+    )
 
-        # ---- Alertas em cards, logo abaixo dos KPIs ----
-        st.markdown("### 🔔 Contas próximas do vencimento")
-        alerts_df = get_due_alerts(planner_id, days_ahead=5)
-        if alerts_df.empty:
-            st.success("Nenhuma conta vencendo nos próximos 5 dias. 🎉")
-        else:
-            today_local = date.today()
-            for _, row in alerts_df.iterrows():
-                venc = row["vencimento"]
-                if not isinstance(venc, date):
-                    try:
-                        venc = pd.to_datetime(venc).date()
-                    except Exception:
-                        venc = None
-                if venc:
-                    dias = (venc - today_local).days
-                    if dias < 0:
-                        status_text = "Já vencida"
-                    elif dias == 0:
-                        status_text = "Vence hoje"
-                    elif dias == 1:
-                        status_text = "Vence amanhã"
-                    else:
-                        status_text = f"Vence em {dias} dias"
-                    venc_str = venc.strftime("%d/%m/%Y")
-                else:
-                    status_text = ""
-                    venc_str = str(row["vencimento"])
+    month_labels_short = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+                          "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+    month_labels_full = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                         "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
-                valor_str = format_currency(float(row["valor"]), currency)
-                desc = row["descricao"]
-                tipo = row.get("tipo", "")
-                categoria = row.get("categoria", "")
+    tabs = st.tabs(month_labels_short)
 
-                card_html = f"""
-                <div class="alert-card">
-                    <div class="alert-card-header">
-                        <span class="alert-icon">🔔</span>
-                        <div class="alert-card-title">{desc}</div>
-                    </div>
-                    <div class="alert-card-body">
-                        <div class="alert-card-meta">
-                            <strong>Vencimento:</strong> {venc_str}<br/>
-                            <strong>Tipo:</strong> {tipo} • {categoria}
-                        </div>
-                        <div class="alert-card-amount">
-                            {valor_str}
-                        </div>
-                    </div>
-                    <div class="alert-card-footer">
-                        <span class="alert-card-badge">⚠️ Conta vencendo • {status_text}</span>
-                    </div>
-                </div>
-                """
-                st.markdown(card_html, unsafe_allow_html=True)
+    for month_index, tab in enumerate(tabs, start=1):
+        with tab:
+            ref_date = date(year_selected, month_index, 15)
+            kpi_data = build_kpi_data(planner_id, reference_date=ref_date)
+            data = kpi_data["raw"]
+            today_ref = kpi_data["today"]
 
-    with col_right:
-        st.markdown("### 📈 Tendência de renda, despesas e resultado")
+            if len(data.keys()) < 3:
+                st.info("Cadastre pelo menos uma renda para visualizar o dashboard completo.")
+                continue
 
-        # Monta séries com rótulos no formato MM/AAAA
-        months_labels = [f"{k.split('-')[1]}/{k.split('-')[0]}" for k in keys_sorted]
-        incomes_vals = [data[k]["income"] for k in keys_sorted]
-        expenses_vals = [data[k]["expenses"] for k in keys_sorted]
-        net_vals = [data[k]["net"] for k in keys_sorted]
+            keys_sorted = sorted(data.keys())
+            prev_key, current_key, next_key = keys_sorted
 
-        fig = go.Figure()
+            inc_prev = data[prev_key]["income"]
+            inc_curr = data[current_key]["income"]
+            inc_next = data[next_key]["income"]
 
-        fig.add_bar(
-            name="Renda",
-            x=months_labels,
-            y=incomes_vals,
-            text=[format_currency(v, currency) for v in incomes_vals],
-            textposition="outside",
-        )
-        fig.add_bar(
-            name="Despesas",
-            x=months_labels,
-            y=expenses_vals,
-            text=[format_currency(v, currency) for v in expenses_vals],
-            textposition="outside",
-        )
+            exp_prev = data[prev_key]["expenses"]
+            exp_curr = data[current_key]["expenses"]
+            exp_next = data[next_key]["expenses"]
 
-        fig.add_trace(
-            go.Scatter(
-                name="Resultado",
-                x=months_labels,
-                y=net_vals,
-                mode="lines+markers+text",
-                text=[format_currency(v, currency) for v in net_vals],
-                textposition="top center",
-                yaxis="y2",
+            renda_delta = ((inc_curr - inc_prev) / inc_prev * 100) if inc_prev else None
+            desp_delta = ((exp_curr - exp_prev) / exp_prev * 100) if exp_prev else None
+
+            ratio = (exp_curr / inc_curr) if inc_curr else 0.0
+            threshold = planner["alert_threshold"]
+            ratio_pct = ratio * 100
+
+            acc = compute_accumulated_balances(planner_id)
+            saldo_atual = acc["saldo_atual"]
+            saldo_futuro = acc["saldo_futuro"]
+
+            st.markdown(
+                f"### 📅 Análise de **{month_labels_full[month_index-1]} / {year_selected}**"
             )
-        )
+            if ratio > threshold:
+                st.markdown(
+                    f'<div class="alert-badge"><span class="bell">🔔</span> Alerta: suas despesas representam {ratio_pct:.1f}% da renda deste mês (limite configurado: {threshold*100:.0f}%).</div>',
+                    unsafe_allow_html=True,
+                )
 
-        fig.update_layout(
-            barmode="group",
-            height=420,
-            margin=dict(l=10, r=50, t=60, b=40),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.5,
-            ),
-            yaxis=dict(
-                title=f"Valores ({currency})",
-                rangemode="tozero",
-            ),
-            yaxis2=dict(
-                title="Resultado",
-                overlaying="y",
-                side="right",
-                showgrid=False,
-            ),
-        )
+            col_left, col_right = st.columns([1, 1])
 
-        st.plotly_chart(fig, use_container_width=True)
+            with col_left:
+                show_kpi_card(
+                    "Renda - mês atual",
+                    inc_curr,
+                    currency,
+                    renda_delta,
+                    help_text=f"Mês anterior: {format_currency(inc_prev, currency)} • Próximo mês projetado: {format_currency(inc_next, currency)}",
+                    variant="income",
+                )
+                show_kpi_card(
+                    "Despesas - mês atual",
+                    exp_curr,
+                    currency,
+                    desp_delta,
+                    help_text=f"Mês anterior: {format_currency(exp_prev, currency)} • Próximo mês previsto: {format_currency(exp_next, currency)}",
+                    variant="expense",
+                )
+                show_kpi_card(
+                    "Resultado do mês (renda - despesas)",
+                    inc_curr - exp_curr,
+                    currency,
+                    None,
+                    help_text=f"Comprometimento: {ratio_pct:.1f}% da renda",
+                    variant="net",
+                )
+                show_kpi_card(
+                    "Saldo acumulado até o mês atual",
+                    saldo_atual,
+                    currency,
+                    None,
+                    help_text="Resultado histórico ajustado por aportes e gastos pontuais.",
+                    variant="net",
+                )
+                show_kpi_card(
+                    "Saldo acumulado projetado (12 meses)",
+                    saldo_futuro,
+                    currency,
+                    None,
+                    help_text="Projeção considerando rendas, despesas e ajustes futuros.",
+                    variant="net",
+                )
 
-        st.markdown("### 🧩 Composição das despesas do mês atual")
-        df_exp = kpi_data["df_expenses"]
-        df_inv = kpi_data["df_invoices"]
-        year = today.year
-        month = today.month
+                st.markdown("### 🔔 Contas próximas do vencimento")
+                alerts_df = get_due_alerts(planner_id, days_ahead=5)
+                if alerts_df.empty:
+                    st.success("Nenhuma conta vencendo nos próximos 5 dias. 🎉")
+                else:
+                    today_local = date.today()
+                    for _, row in alerts_df.iterrows():
+                        venc = row["vencimento"]
+                        if not isinstance(venc, date):
+                            try:
+                                venc = pd.to_datetime(venc).date()
+                            except Exception:
+                                venc = None
+                        if venc:
+                            dias = (venc - today_local).days
+                            if dias < 0:
+                                status_text = "Já vencida"
+                            elif dias == 0:
+                                status_text = "Vence hoje"
+                            elif dias == 1:
+                                status_text = "Vence amanhã"
+                            else:
+                                status_text = f"Vence em {dias} dias"
+                            venc_str = venc.strftime("%d/%m/%Y")
+                        else:
+                            status_text = ""
+                            venc_str = str(row["vencimento"])
 
-        parts = []
-        if not df_exp.empty:
-            df_e = df_exp.copy()
-            df_e["due_date"] = pd.to_datetime(df_e["due_date"]).dt.date
-            df_e = df_e[df_e["due_date"].apply(lambda d: d.year == year and d.month == month)]
-            if not df_e.empty:
-                grp = df_e.groupby("category")["amount"].sum().reset_index()
-                grp["tipo"] = "Despesas"
-                parts.append(grp)
-        if not df_inv.empty:
-            df_i = df_inv.copy()
-            df_i = df_i[df_i["invoice_month"] == f"{year:04d}-{month:02d}"]
-            if not df_i.empty:
-                grp2 = df_i.groupby("bank_name")["amount_due"].sum().reset_index()
-                grp2.rename(columns={"bank_name": "category", "amount_due": "amount"}, inplace=True)
-                grp2["tipo"] = "Cartões"
-                parts.append(grp2)
-        if parts:
-            df_pie = pd.concat(parts, ignore_index=True)
-            df_pie["label"] = df_pie["tipo"] + " - " + df_pie["category"]
-            fig2 = px.pie(df_pie, names="label", values="amount", hole=0.45)
-            fig2.update_layout(height=350, margin=dict(l=10,r=10,t=40,b=10))
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("Ainda não há dados de despesas para o mês atual.")
+                        valor_str = format_currency(float(row["valor"]), currency)
+                        desc = row["descricao"]
+                        tipo = row.get("tipo", "")
+                        categoria = row.get("categoria", "")
+
+                        card_html = f"""
+                        <div class="alert-card">
+                            <div class="alert-card-header">
+                                <span class="alert-icon">🔔</span>
+                                <div class="alert-card-title">{desc}</div>
+                            </div>
+                            <div class="alert-card-body">
+                                <div class="alert-card-meta">
+                                    <strong>Vencimento:</strong> {venc_str}<br/>
+                                    <strong>Tipo:</strong> {tipo} • {categoria}
+                                </div>
+                                <div class="alert-card-amount">
+                                    {valor_str}
+                                </div>
+                            </div>
+                            <div class="alert-card-footer">
+                                <span class="alert-card-badge">⚠️ Conta vencendo • {status_text}</span>
+                            </div>
+                        </div>
+                        """
+                        st.markdown(card_html, unsafe_allow_html=True)
+
+            with col_right:
+                # ---------- Gráficos ----------
+                months_labels = [f"{k.split('-')[1]}/{k.split('-')[0]}" for k in keys_sorted]
+                incomes_vals = [data[k]["income"] for k in keys_sorted]
+                expenses_vals = [data[k]["expenses"] for k in keys_sorted]
+                net_vals = [data[k]["net"] for k in keys_sorted]
+
+                fig = go.Figure()
+                fig.add_bar(
+                    name="Renda",
+                    x=months_labels,
+                    y=incomes_vals,
+                    text=[format_currency(v, currency) for v in incomes_vals],
+                    textposition="outside",
+                    texttemplate="<b>%{text}</b>",
+                    textfont=dict(size=11),
+                )
+                fig.add_bar(
+                    name="Despesas",
+                    x=months_labels,
+                    y=expenses_vals,
+                    text=[format_currency(v, currency) for v in expenses_vals],
+                    textposition="outside",
+                    texttemplate="<b>%{text}</b>",
+                    textfont=dict(size=11),
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        name="Resultado",
+                        x=months_labels,
+                        y=net_vals,
+                        mode="lines+markers",
+                        customdata=[format_currency(v, currency) for v in net_vals],
+                        hovertemplate="%{x}<br>Resultado: %{customdata}<extra></extra>",
+                        yaxis="y2",
+                    )
+                )
+                fig.update_layout(
+                    barmode="group",
+                    height=360,
+                    margin=dict(l=10, r=40, t=40, b=40),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="center",
+                        x=0.5,
+                        bgcolor="rgba(30,64,175,0.95)",
+                        bordercolor="rgba(15,23,42,1)",
+                        borderwidth=1,
+                        font=dict(
+                            color="white",
+                            size=11,
+                        ),
+                    ),
+                    yaxis=dict(
+                        title=f"Valores ({currency})",
+                        rangemode="tozero",
+                    ),
+                    yaxis2=dict(
+                        title="Resultado",
+                        overlaying="y",
+                        side="right",
+                        showgrid=False,
+                    ),
+                )
+
+                # Card de tendência com fundo destacado
+                st.markdown(
+                    '<div class="chart-card">'
+                    '<div class="chart-card-title">📈 Tendência de renda, despesas e resultado '
+                    '<span class="label">Jan / mês anterior / próximo mês</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                # Dados de despesas do mês atual para gráficos por classe
+                df_exp = kpi_data["df_expenses"].copy()
+                df_inv = kpi_data["df_invoices"].copy()
+                year = today_ref.year
+                month = today_ref.month
+
+                parts = []
+                if not df_exp.empty:
+                    df_e = df_exp.copy()
+                    df_e["due_date"] = pd.to_datetime(df_e["due_date"]).dt.date
+                    df_e = df_e[df_e["due_date"].apply(lambda d: d.year == year and d.month == month)]
+                    if not df_e.empty:
+                        grp = df_e.groupby("category")["amount"].sum().reset_index()
+                        grp["tipo"] = "Despesas"
+                        parts.append(grp)
+                if not df_inv.empty:
+                    df_i = df_inv.copy()
+                    df_i = df_i[df_i["invoice_month"] == f"{year:04d}-{month:02d}"]
+                    if not df_i.empty:
+                        grp2 = df_i.groupby("bank_name")["amount_due"].sum().reset_index()
+                        grp2.rename(columns={"bank_name": "category", "amount_due": "amount"}, inplace=True)
+                        grp2["tipo"] = "Cartões"
+                        parts.append(grp2)
+
+                if parts:
+                    df_pie = pd.concat(parts, ignore_index=True)
+                    df_pie["label"] = df_pie["tipo"] + " - " + df_pie["category"]
+                    st.markdown(
+                        '<div class="chart-card">'
+                        '<div class="chart-card-title">🍕 Composição das despesas do mês</div>',
+                        unsafe_allow_html=True,
+                    )
+                    fig2 = px.pie(df_pie, names="label", values="amount", hole=0.45)
+                    fig2.update_layout(height=280, margin=dict(l=10, r=10, t=30, b=10))
+                    st.plotly_chart(fig2, use_container_width=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                    # Gráfico de barras por classe (categoria)
+                    df_classes = df_pie.groupby("category")["amount"].sum().reset_index()
+                    st.markdown(
+                        '<div class="chart-card">'
+                        '<div class="chart-card-title">🧾 Gastos por classe de despesa</div>',
+                        unsafe_allow_html=True,
+                    )
+                    fig3 = px.bar(
+                        df_classes.sort_values("amount", ascending=True),
+                        x="amount",
+                        y="category",
+                        orientation="h",
+                    )
+                    fig3.update_layout(
+                        height=300,
+                        margin=dict(l=10, r=10, t=30, b=40),
+                        xaxis_title=f"Valor ({currency})",
+                        yaxis_title="Classe",
+                        legend=dict(
+                            title="Classe",
+                            bgcolor="#1E40AF",          # 🔵 box azul atrás da legenda
+                            bordercolor="#0F172A",      # opcional: borda mais escura
+                            borderwidth=1,
+                            font=dict(
+                                color="white",          # texto branco
+                                size=12,
+                            ),
+                            orientation="v",
+                            yanchor="top",
+                            y=1,
+                            xanchor="left",
+                            x=1.02,
+                        ),
+                        showlegend=True,                # garante que a legenda apareça
+                    )
+                    st.plotly_chart(fig3, use_container_width=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                else:
+                    st.info("Ainda não há dados de despesas para o mês selecionado.")
+
+            st.markdown("---")
+            # ---------- Lista de despesas do mês com status de pagamento ----------
+            st.markdown("### 🧾 Despesas do mês selecionado")
+
+            df_exp_all = kpi_data["df_expenses"].copy()
+            if df_exp_all.empty:
+                st.info("Nenhuma despesa cadastrada para este planner.")
+            else:
+                df_m = df_exp_all.copy()
+                df_m["due_date"] = pd.to_datetime(df_m["due_date"]).dt.date
+                df_m = df_m[df_m["due_date"].apply(lambda d: d.year == year_selected and d.month == month_index)]
+                if df_m.empty:
+                    st.info("Nenhuma despesa cadastrada para este mês.")
+                else:
+                    if "is_paid" not in df_m.columns:
+                        df_m["is_paid"] = 0
+                    df_m = df_m[["id", "description", "category", "due_date", "amount", "is_paid"]]
+                    df_m.rename(
+                        columns={
+                            "description": "Descrição",
+                            "category": "Classe",
+                            "due_date": "Vencimento",
+                            "amount": "Valor",
+                            "is_paid": "Paga",
+                        },
+                        inplace=True,
+                    )
+                    df_m["Paga"] = df_m["Paga"].astype(bool)
+
+                    edited = st.data_editor(
+                        df_m,
+                        num_rows="fixed",
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Descrição": st.column_config.TextColumn("Descrição"),
+                            "Classe": st.column_config.TextColumn("Classe"),
+                            "Vencimento": st.column_config.DateColumn("Vencimento",format="DD/MM/YYYY"),
+                            "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+                            "Paga": st.column_config.CheckboxColumn("Paga"),
+                        },
+                        key=f"editor_expenses_{year_selected}_{month_index}",
+                    )
+
+                    if st.button(
+                        "💾 Salvar status de pagamento",
+                        key=f"btn_save_status_{year_selected}_{month_index}",
+                    ):
+                        for _, row in edited.iterrows():
+                            try:
+                                exp_id = int(row["id"])
+                                paid_flag = bool(row["Paga"])
+                                set_expense_paid(exp_id, paid_flag)
+                            except Exception:
+                                continue
+                        st.success("Status de pagamento atualizado.")
+                        st.rerun()
 
 def incomes_page(planner_id: int):
     st.header("💰 Rendas")
     planner = get_planner(planner_id)
     currency = planner["currency"]
 
-    tab_new, tab_list = st.tabs(["Cadastrar renda", "Listar / excluir rendas"])
-
-    with tab_new:
+    # Cadastro de renda em modo expansível
+    with st.expander("➕ Cadastrar renda", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
-            desc = st.text_input("Descrição da renda (ex: Salário, Comissão)", key="income_desc")
+            desc = st.text_input(
+                "Descrição da renda (ex: Salário, Comissão)",
+                key="income_desc",
+            )
             income_type = st.selectbox(
                 "Tipo de renda",
                 ["Fixa", "Comissão", "Premiação", "Extra", "Outros"],
-                key="income_type"
+                key="income_type",
             )
             amount = st.number_input(
                 f"Valor ({currency})",
                 min_value=0.0,
                 step=100.0,
                 format="%.2f",
-                key="income_amount"
+                key="income_amount",
             )
         with col2:
-            start_date = st.date_input("Data inicial", value=date.today(), key="income_start_date")
+            start_date = st.date_input(
+                "Data inicial",
+                value=date.today(),
+                format="DD/MM/YYYY",
+                key="income_start_date",
+            )
             recurrence = st.selectbox(
                 "Recorrência",
                 ["Apenas este mês", "Todos os meses", "Por número de meses"],
-                key="income_recurrence"
+                key="income_recurrence",
             )
             months_count = None
             if recurrence == "Por número de meses":
@@ -1192,7 +1468,7 @@ def incomes_page(planner_id: int):
                     min_value=1,
                     step=1,
                     value=1,
-                    key="income_months_count"
+                    key="income_months_count",
                 )
 
         if st.button("Salvar renda", type="primary", key="btn_save_income"):
@@ -1204,6 +1480,7 @@ def incomes_page(planner_id: int):
                     rec_value = "monthly"
                 elif recurrence == "Por número de meses":
                     rec_value = "x_months"
+
                 insert_income(
                     planner_id,
                     desc,
@@ -1211,129 +1488,278 @@ def incomes_page(planner_id: int):
                     amount,
                     start_date,
                     rec_value,
-                    int(months_count) if months_count else None
+                    int(months_count) if months_count else None,
                 )
                 st.success("Renda cadastrada com sucesso!")
 
-    with tab_list:
-        df = get_incomes(planner_id)
-        if df.empty:
-            st.info("Nenhuma renda cadastrada ainda.")
-        else:
-            df_view = df.copy()
-            df_view["start_date"] = pd.to_datetime(df_view["start_date"]).dt.date
-            df_view.rename(columns={
-                "description": "Descrição",
-                "income_type": "Tipo",
-                "amount": "Valor",
-                "start_date": "Data inicial",
-                "recurrence": "Recorrência",
-                "months_count": "Qtd meses"
-            }, inplace=True)
-            st.dataframe(
-                df_view[["id","Descrição","Tipo","Valor","Data inicial","Recorrência","Qtd meses"]],
-                use_container_width=True
-            )
+    # Listagem de rendas
+    st.markdown("### Listagem de rendas")
 
-            ids = df["id"].tolist()
-            id_to_delete = st.selectbox(
-                "Selecione uma renda para excluir",
-                options=[""]+ids,
-                key="income_delete_select"
-            )
-            if id_to_delete:
-                if st.button("Excluir renda selecionada", key="btn_delete_income"):
-                    delete_income(int(id_to_delete))
-                    st.success("Renda excluída.")
-                    st.rerun()
+    df = get_incomes(planner_id)
+    if df.empty:
+        st.info("Nenhuma renda cadastrada ainda.")
+        return
+
+    df_view = df.copy()
+    df_view["start_date"] = pd.to_datetime(df_view["start_date"]).dt.strftime("%d/%m/%Y")
+
+    # Mapear códigos de recorrência para rótulos em português
+    rec_map = {
+        "once": "Apenas este mês",
+        "monthly": "Todos os meses",
+        "x_months": "Por número de meses",
+    }
+    if "recurrence" in df_view.columns:
+        df_view["recurrence"] = df_view["recurrence"].map(rec_map).fillna(df_view["recurrence"])
+
+    df_view.rename(
+        columns={
+            "description": "Descrição",
+            "income_type": "Tipo",
+            "amount": "Valor",
+            "start_date": "Data inicial",
+            "recurrence": "Recorrência",
+            "months_count": "Qtd meses",
+        },
+        inplace=True,
+    )
+
+    st.dataframe(
+        df_view[
+            [
+                "id",
+                "Descrição",
+                "Tipo",
+                "Valor",
+                "Data inicial",
+                "Recorrência",
+                "Qtd meses",
+            ]
+        ],
+        use_container_width=True,
+    )
+
+    # Exclusão de renda
+    st.markdown("#### Excluir renda")
+
+    ids = df["id"].tolist()
+    id_to_delete = st.selectbox(
+        "Selecione uma renda para excluir",
+        options=[""] + ids,
+        key="income_delete_select",
+    )
+    if id_to_delete:
+        if st.button("Excluir renda selecionada", key="btn_delete_income"):
+            delete_income(int(id_to_delete))
+            st.success("Renda excluída.")
+            st.rerun()
 
 def expenses_page(planner_id: int):
     st.header("💸 Despesas")
     planner = get_planner(planner_id)
     currency = planner["currency"]
 
-    categories = [
-        "Financiamento", "Luz", "Água", "Internet", "Cartão de Crédito (compra)",
-        "Telefonia", "Aluguel", "Impostos", "Outros"
-    ]
+    # Recupera categorias existentes e padrão
+    all_exp = get_expenses(planner_id)
+    existing_categories: List[str] = []
+    if not all_exp.empty:
+        existing_categories = sorted([c for c in all_exp["category"].dropna().unique().tolist() if c])
+    try:
+        saved_categories = get_expense_categories(planner_id)
+    except Exception:
+        saved_categories = []
+    categories = sorted(set(DEFAULT_EXPENSE_CLASSES + existing_categories + saved_categories))
 
-    tab_new, tab_list = st.tabs(["Cadastrar despesa", "Listar / controlar despesas"])
-
-    with tab_new:
+    # Cadastro de despesa em modo expansível
+    with st.expander("Cadastrar despesa", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
             desc = st.text_input("Descrição da despesa", key="expense_desc")
-            category = st.selectbox("Categoria", categories, key="expense_category")
+            category = st.selectbox(
+                "Classe / categoria da despesa",
+                options=categories,
+                key="expense_category",
+            )
+
+            new_class = st.text_input(
+                "Nova classe de despesa (se não encontrar na lista)",
+                key="expense_new_class",
+            )
+            if st.button("➕ Criar nova classe de despesa", key="btn_add_expense_class"):
+                if new_class:
+                    add_expense_category(planner_id, new_class)
+                    st.session_state["expense_category"] = new_class
+                    st.success(f"Classe '{new_class}' adicionada. Ela já está disponível na lista.")
+                    st.rerun()
+
+        with col2:
             amount = st.number_input(
-                f"Valor ({currency})",
+                f"Valor da parcela ({currency})",
                 min_value=0.0,
                 step=50.0,
                 format="%.2f",
-                key="expense_amount"
+                key="expense_amount",
             )
-        with col2:
             due_date = st.date_input(
-                "Data de vencimento",
+                "Data de vencimento da 1ª parcela",
                 value=date.today(),
-                key="expense_due_date"
+                format="DD/MM/YYYY",
+                key="expense_due_date",
             )
-            st.caption("Para despesas futuras, selecione a data de vencimento correspondente.")
+            is_recurring = st.checkbox(
+                "Despesa recorrente / parcelada? (aluguel, financiamento, compras parceladas, etc.)",
+                key="expense_is_recurring",
+            )
+            months_count = None
+            if is_recurring:
+                months_count = st.number_input(
+                    "Quantidade de parcelas / meses",
+                    min_value=1,
+                    step=1,
+                    value=2,
+                    help="Informe por quantos meses essa despesa irá se repetir.",
+                    key="expense_months_count",
+                )
 
         if st.button("Salvar despesa", type="primary", key="btn_save_expense"):
             if not desc or amount <= 0:
                 st.error("Informe descrição e valor positivo.")
             else:
-                insert_expense(planner_id, desc, category, amount, due_date)
-                st.success("Despesa cadastrada com sucesso!")
+                if is_recurring and months_count:
+                    for i in range(int(months_count)):
+                        d = add_months(due_date, i)
+                        insert_expense(planner_id, desc, category, amount, d)
+                    st.success(f"Despesa recorrente cadastrada para {int(months_count)} meses.")
+                else:
+                    insert_expense(planner_id, desc, category, amount, due_date)
+                    st.success("Despesa cadastrada com sucesso!")
 
-    with tab_list:
-        df = get_expenses(planner_id)
-        if df.empty:
-            st.info("Nenhuma despesa cadastrada ainda.")
+    # Listagem e controle de despesas
+    st.markdown("### Listagem e controle de despesas")
+
+    df = get_expenses(planner_id)
+    if df.empty:
+        st.info("Nenhuma despesa cadastrada ainda.")
+        return
+
+    df_view = df.copy()
+    df_view["due_date"] = pd.to_datetime(df_view["due_date"]).dt.strftime("%d/%m/%Y")
+    if "is_paid" not in df_view.columns:
+        df_view["is_paid"] = 0
+    df_view["Status"] = df_view["is_paid"].apply(lambda v: "Paga" if v else "Pendente")
+    df_view.rename(
+        columns={
+            "description": "Descrição",
+            "category": "Classe",
+            "amount": "Valor",
+            "due_date": "Vencimento",
+        },
+        inplace=True,
+    )
+    st.dataframe(
+        df_view[["id", "Descrição", "Classe", "Valor", "Vencimento", "Status"]],
+        use_container_width=True,
+    )
+
+    # Manutenção item a item (excluir ou marcar como paga)
+    st.markdown("#### Manutenção de despesas (item a item)")
+
+    ids = df["id"].tolist()
+    id_selected = st.selectbox(
+        "Selecione uma despesa",
+        options=[""] + ids,
+        key="expense_select_maintenance",
+    )
+
+    if id_selected:
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            if st.button("Excluir despesa selecionada", key="btn_delete_expense"):
+                delete_expense(int(id_selected))
+                st.success("Despesa excluída.")
+                st.rerun()
+        with col_b:
+            novo_status = st.selectbox(
+                "Status de pagamento",
+                ["Pendente", "Paga"],
+                key="expense_status_select",
+            )
+        with col_c:
+            if st.button("Atualizar status", key="btn_update_expense_status"):
+                set_expense_paid(int(id_selected), novo_status == "Paga")
+                st.success("Status atualizado.")
+                st.rerun()
+
+    # Exclusão em lote de despesas recorrentes / grupo
+    st.markdown("#### Exclusão em lote de despesas recorrentes / grupo")
+
+    desc_options = sorted(df["description"].dropna().unique().tolist())
+    selected_desc = st.selectbox(
+        "Descrição do grupo de despesas",
+        options=[""] + desc_options,
+        key="expense_group_desc",
+    )
+
+    if selected_desc:
+        df_desc = df[df["description"] == selected_desc].copy()
+
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            cat_options = sorted(df_desc["category"].dropna().unique().tolist())
+            selected_cat = st.selectbox(
+                "Filtrar por classe (opcional)",
+                options=["(Todas)"] + cat_options,
+                key="expense_group_cat",
+            )
+        with col_g2:
+            amt_options = sorted(df_desc["amount"].unique().tolist())
+            amt_labels = [format_currency(a, currency) for a in amt_options]
+            selected_amt_label = st.selectbox(
+                "Filtrar por valor (opcional)",
+                options=["(Todos)"] + amt_labels,
+                key="expense_group_amount",
+            )
+            selected_amt = None
+            if selected_amt_label != "(Todos)":
+                selected_amt = amt_options[amt_labels.index(selected_amt_label)]
+
+        mask = df["description"] == selected_desc
+        if selected_cat != "(Todas)":
+            mask &= df["category"] == selected_cat
+        if selected_amt is not None:
+            mask &= df["amount"] == selected_amt
+
+        df_group = df[mask].copy()
+
+        if df_group.empty:
+            st.info("Nenhuma despesa encontrada com esses filtros.")
         else:
-            df_view = df.copy()
-            df_view["due_date"] = pd.to_datetime(df_view["due_date"]).dt.date
-            if "is_paid" not in df_view.columns:
-                df_view["is_paid"] = 0
-            df_view["Status"] = df_view["is_paid"].apply(lambda v: "Paga" if v else "Pendente")
-            df_view.rename(columns={
-                "description": "Descrição",
-                "category": "Categoria",
-                "amount": "Valor",
-                "due_date": "Vencimento"
-            }, inplace=True)
+            df_group_view = df_group.copy()
+            df_group_view["due_date"] = pd.to_datetime(df_group_view["due_date"]).dt.strftime("%d/%m/%Y")
+            if "is_paid" not in df_group_view.columns:
+                df_group_view["is_paid"] = 0
+            df_group_view["Status"] = df_group_view["is_paid"].apply(lambda v: "Paga" if v else "Pendente")
+            df_group_view.rename(
+                columns={
+                    "description": "Descrição",
+                    "category": "Classe",
+                    "amount": "Valor",
+                    "due_date": "Vencimento",
+                },
+                inplace=True,
+            )
+
             st.dataframe(
-                df_view[["id","Descrição","Categoria","Valor","Vencimento","Status"]],
-                use_container_width=True
+                df_group_view[["id", "Descrição", "Classe", "Valor", "Vencimento", "Status"]],
+                use_container_width=True,
             )
 
-            st.markdown("#### Manutenção de despesas")
-
-            ids = df["id"].tolist()
-            id_selected = st.selectbox(
-                "Selecione uma despesa",
-                options=[""] + ids,
-                key="expense_select_maintenance"
-            )
-
-            if id_selected:
-                col_a, col_b, col_c = st.columns(3)
-                with col_a:
-                    if st.button("Excluir despesa selecionada", key="btn_delete_expense"):
-                        delete_expense(int(id_selected))
-                        st.success("Despesa excluída.")
-                        st.rerun()
-                with col_b:
-                    novo_status = st.selectbox(
-                        "Status de pagamento",
-                        ["Pendente", "Paga"],
-                        key="expense_status_select"
-                    )
-                with col_c:
-                    if st.button("Atualizar status", key="btn_update_expense_status"):
-                        set_expense_paid(int(id_selected), novo_status == "Paga")
-                        st.success("Status atualizado.")
-                        st.rerun()
+            st.warning(f"Serão excluídas {len(df_group)} despesas com esses critérios.")
+            if st.button("Excluir grupo de despesas", type="primary", key="btn_delete_group_expenses"):
+                for eid in df_group["id"].tolist():
+                    delete_expense(int(eid))
+                st.success("Grupo de despesas excluído com sucesso.")
+                st.rerun()
 
 def credit_cards_page(planner_id: int):
     st.header("💳 Cartões de crédito")
@@ -1404,6 +1830,7 @@ def credit_cards_page(planner_id: int):
                 due_date = st.date_input(
                     "Vencimento da fatura",
                     value=date.today(),
+                    format="DD/MM/YYYY",
                     key="invoice_due_date"
                 )
             is_paid = st.checkbox("Fatura já está paga?", value=False, key="invoice_is_paid")
@@ -1421,7 +1848,7 @@ def credit_cards_page(planner_id: int):
             st.info("Nenhuma fatura cadastrada ainda.")
         else:
             df_view = df_inv.copy()
-            df_view["due_date"] = pd.to_datetime(df_view["due_date"]).dt.date
+            df_view["due_date"] = pd.to_datetime(df_view["due_date"]).dt.strftime("%d/%m/%Y")
             df_view["Status"] = df_view["is_paid"].apply(lambda v: "Paga" if v else "Em aberto")
             df_view.rename(columns={
                 "id": "ID",
@@ -1467,6 +1894,8 @@ def alerts_page(planner_id: int):
 
     st.markdown("### Contas próximas do vencimento (próximos 5 dias)")
     df_alerts_5 = get_due_alerts(planner_id, days_ahead=5)
+    if not df_alerts_5.empty and "vencimento" in df_alerts_5.columns:
+        df_alerts_5["vencimento"] = pd.to_datetime(df_alerts_5["vencimento"]).dt.strftime("%d/%m/%Y")
     if df_alerts_5.empty:
         st.success("Nenhuma conta vencendo nos próximos 5 dias. 🎉")
     else:
@@ -1474,6 +1903,8 @@ def alerts_page(planner_id: int):
 
     st.markdown("### Contas vencendo amanhã")
     df_alerts_1 = get_due_alerts(planner_id, days_ahead=1)
+    if not df_alerts_1.empty and "vencimento" in df_alerts_1.columns:
+        df_alerts_1["vencimento"] = pd.to_datetime(df_alerts_1["vencimento"]).dt.strftime("%d/%m/%Y")
     if df_alerts_1.empty:
         st.info("Nenhuma conta vencendo amanhã.")
     else:
@@ -1500,7 +1931,7 @@ def savings_adjustments_page(planner_id: int):
     with col1:
         desc = st.text_input("Descrição", key="adj_desc", placeholder="Ex: Compra de livro, viagem, aporte extra")
     with col2:
-        movement_date = st.date_input("Data do movimento", value=date.today(), key="adj_date")
+        movement_date = st.date_input("Data do movimento", value=date.today(), format="DD/MM/YYYY", key="adj_date")
     with col3:
         movement_type = st.selectbox(
             "Tipo de movimento",
@@ -1531,7 +1962,7 @@ def savings_adjustments_page(planner_id: int):
         st.info("Nenhum ajuste registrado ainda.")
     else:
         df_view = df_adj.copy()
-        df_view["movement_date"] = pd.to_datetime(df_view["movement_date"]).dt.date
+        df_view["movement_date"] = pd.to_datetime(df_view["movement_date"]).dt.strftime("%d/%m/%Y")
         df_view["Efeito"] = df_view["movement_type"].apply(
             lambda t: "Aumenta saldo" if t == "aporte" else "Reduz saldo"
         )
@@ -1569,6 +2000,8 @@ def admin_page():
         conn
     )
     conn.close()
+    if not df_users.empty and "created_at" in df_users.columns:
+        df_users["created_at"] = pd.to_datetime(df_users["created_at"], errors="coerce").dt.strftime("%d/%m/%Y")
     if df_users.empty:
         st.info("Nenhum usuário encontrado.")
     else:
@@ -1602,6 +2035,8 @@ def admin_page():
     JOIN users u ON u.id = p.owner_user_id
     """, conn)
     conn.close()
+    if not df_planners.empty and "created_at" in df_planners.columns:
+        df_planners["created_at"] = pd.to_datetime(df_planners["created_at"], errors="coerce").dt.strftime("%d/%m/%Y")
     if df_planners.empty:
         st.info("Nenhum planner cadastrado.")
     else:
