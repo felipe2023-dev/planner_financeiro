@@ -49,12 +49,6 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-4. Primeiro acesso:
-   - Um usuário master padrão será criado automaticamente:
-     - Usuário: `admin`
-     - Senha: `admin`
-   - Faça login como `admin`, crie e aprove os demais usuários, e altere a senha do admin o quanto antes.
-
 ## Observações
 
 - O banco de dados SQLite (`finance_manager.db`) será criado automaticamente na raiz do projeto.
