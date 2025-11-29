@@ -1424,13 +1424,17 @@ def dashboard_page(planner_id: int):
                         st.success("Status de pagamento atualizado.")
                         st.rerun()
 
+
 def incomes_page(planner_id: int):
     st.header("💰 Rendas")
     planner = get_planner(planner_id)
+    if planner is None:
+        st.error("Planner não encontrado. Volte à tela inicial e selecione um planner válido.")
+        return
     currency = planner["currency"]
 
     # Cadastro de renda em modo expansível
-    with st.expander("➕ Cadastrar renda", expanded=False):
+    with st.expander("Cadastrar renda", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
             desc = st.text_input(
